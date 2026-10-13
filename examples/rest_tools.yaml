@@ -1,0 +1,14 @@
+tools:
+  - name: httpbin_get
+    description: Call httpbin with a message query parameter for connectivity testing.
+    method: GET
+    url: https://httpbin.org/get
+    parameters:
+      type: object
+      properties:
+        message:
+          type: string
+          description: Text sent as the message query parameter.
+      required: [message]
+      additionalProperties: false
+    query_params: [message]

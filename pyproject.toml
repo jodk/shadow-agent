@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "learning-react-agent"
+version = "0.1.0"
+description = "A small ReAct agent for learning tool calling, REST tools, MCP, and skills."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "fastapi>=0.110,<1",
+  "httpx>=0.27,<1",
+  "pydantic>=2.6,<3",
+  "PyYAML>=6,<7",
+  "uvicorn>=0.29,<1",
+]
+
+[project.optional-dependencies]
+mcp = ["mcp>=1.0,<2"]
+vector = [
+  "chromadb>=1.0,<2",
+  "sentence-transformers>=3.0,<6",
+]
+dev = ["pytest>=8,<9", "pytest-asyncio>=0.23,<1"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+react_agent = ["static/*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+testpaths = ["tests"]

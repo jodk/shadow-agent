@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ReAct Agent</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="sidebar">
+        <div class="sidebar-brand">
+          <div class="brand-mark" aria-hidden="true">R</div>
+          <div class="brand-copy">
+            <strong>ReAct Agent</strong>
+            <span>学习工作区</span>
+          </div>
+        </div>
+        <button id="new-session-button" class="new-session-button" type="button">
+          <span class="button-icon" aria-hidden="true">＋</span>
+          <span>新建会话</span>
+          <kbd>⌘ N</kbd>
+        </button>
+        <div class="sidebar-section-label">
+          <span>会话</span>
+          <span id="session-count" class="session-count">0</span>
+        </div>
+        <div id="session-list" class="session-list" aria-label="会话列表"></div>
+        <div class="sidebar-footer">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span>本地 SQLite 已连接</span>
+        </div>
+      </aside>
+
+      <section class="workspace">
+        <header class="workspace-header">
+          <div class="conversation-heading">
+            <span class="eyebrow">对话</span>
+            <h1 id="conversation-title">新会话</h1>
+          </div>
+          <div class="header-actions">
+            <div class="usage-strip" aria-label="Token 使用量">
+              <div class="usage-cell">
+                <span>本轮输入</span>
+                <strong id="turn-input-tokens">0</strong>
+              </div>
+              <div class="usage-divider" aria-hidden="true"></div>
+              <div class="usage-cell">
+                <span>本轮输出</span>
+                <strong id="turn-output-tokens">0</strong>
+              </div>
+              <div class="usage-divider" aria-hidden="true"></div>
+              <div class="usage-cell">
+                <span>本轮总计</span>
+                <strong id="turn-total-tokens">0</strong>
+              </div>
+              <div class="usage-divider" aria-hidden="true"></div>
+              <div class="usage-cell usage-cell-total">
+                <span>会话总计</span>
+                <strong id="session-total-tokens">0</strong>
+              </div>
+            </div>
+            <span id="usage-source" class="usage-source">等待第一轮对话</span>
+            <button id="clear-button" class="header-icon-button" type="button" title="清空当前会话" aria-label="清空当前会话">
+              <span aria-hidden="true">⌫</span>
+            </button>
+          </div>
+        </header>
+
+        <section id="messages" class="messages" aria-live="polite">
+          <div class="welcome-state">
+            <div class="welcome-icon" aria-hidden="true">✦</div>
+            <h2>开始一段对话</h2>
+            <p>输入问题，观察模型如何组织回答并调用工具。</p>
+          </div>
+        </section>
+
+        <footer class="composer-area">
+          <form id="chat-form" class="composer">
+            <label class="sr-only" for="message-input">消息</label>
+            <textarea id="message-input" rows="1" placeholder="输入消息..." required></textarea>
+            <div class="composer-toolbar">
+              <span class="composer-hint">Enter 发送 · Shift + Enter 换行</span>
+              <div class="composer-actions">
+                <button id="stop-button" class="stop-button" type="button" hidden>停止</button>
+                <button id="send-button" class="send-button" type="submit">
+                  <span>发送</span>
+                  <span class="send-icon" aria-hidden="true">↑</span>
+                </button>
+              </div>
+            </div>
+          </form>
+          <p class="composer-disclaimer">模型输出可能存在错误，请结合上下文进行判断。</p>
+        </footer>
+      </section>
+    </main>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>

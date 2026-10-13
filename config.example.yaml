@@ -1,0 +1,58 @@
+model:
+  base_url: "https://api.openai.com/v1"
+  api_key: "replace-with-your-api-key"
+  model: "gpt-4.1-mini"
+  temperature: 0.2
+  timeout_seconds: 60
+
+# 日志不会记录 API Key、完整提示词、用户消息或工具返回正文。
+logging:
+  level: INFO
+  console: true
+  file: "./data/agent.log"
+  # 单个日志文件最大 10 MB，达到上限后自动滚动。
+  max_bytes: 10485760
+  backup_count: 5
+
+agent:
+  system_prompt: |
+    You are a helpful assistant. Use tools when they provide a more reliable
+    answer than guessing. Explain the final result clearly.
+  max_steps: 10
+  # SQLite 保存全部原始消息；相对路径相对于 config.yaml 所在目录。
+  memory_db: "./data/memory.db"
+  # 每次请求原样保留的最近消息数量。
+  recent_messages: 8
+  # 通过 SQLite FTS5/BM25 召回的旧消息数量。
+  keyword_memory_limit: 5
+  # 通过 embedding 语义检索召回的旧消息数量；未配置向量模型时为 0 命中。
+  vector_memory_limit: 5
+  # 是否启用 Chroma 中文向量检索。模型不存在时会在后台自动联网下载。
+  vector_enabled: true
+  embedding_model: "shibing624/text2vec-base-chinese"
+  # 默认使用 CPU，避免 macOS MPS 在后台线程中触发底层 segmentation fault。
+  embedding_device: "cpu"
+  # 后台生成 embedding 并写入 Chroma 的 worker 数量。
+  vector_workers: 1
+  # BM25 和向量检索融合后，最终放入上下文的旧消息数量。
+  fused_memory_limit: 8
+  # RRF 平滑参数。常用默认值为 60，越大越不强调名次差异。
+  rrf_k: 60
+  # 是否从所有会话检索长期记忆，而不是只检索当前会话。
+  cross_session_memory: true
+
+tools:
+  rest:
+    files:
+      - "./examples/rest_tools.yaml"
+  mcp_servers: []
+  # Example:
+  # mcp_servers:
+  #   - name: filesystem
+  #     transport: stdio
+  #     command: npx
+  #     args: ["-y", "@modelcontextprotocol/server-filesystem", "./workspace"]
+
+skills:
+  directories:
+    - "./examples/skills"

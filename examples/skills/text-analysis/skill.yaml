@@ -1,0 +1,5 @@
+# 是否在 Agent 启动时加载这个 Skill。
+enabled: true
+
+# SkillLoader 会动态导入这个 Python 文件，并读取其中名为 TOOLS 的列表。
+python_module: tools.py
