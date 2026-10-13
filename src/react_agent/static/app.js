@@ -66,6 +66,63 @@ function appendAssistantDelta(content) {
   messages.scrollTop = messages.scrollHeight;
 }
 
+function createSseParser(onEvent) {
+  // 使用逐行状态机解析 SSE。网络 chunk 可以在任意字节位置截断，甚至把 \r\n
+  // 拆到两个 chunk 中；逐行处理比按“双换行正则”切块更稳定，尤其适用于 Safari。
+  let textBuffer = "";
+  let eventType = "message";
+  let dataLines = [];
+
+  async function dispatchEvent() {
+    if (!dataLines.length) {
+      eventType = "message";
+      return;
+    }
+    const rawData = dataLines.join("\n");
+    const currentType = eventType;
+    eventType = "message";
+    dataLines = [];
+    await onEvent({
+      type: currentType,
+      data: JSON.parse(rawData),
+    });
+  }
+
+  async function processLine(line) {
+    if (line === "") {
+      await dispatchEvent();
+      return;
+    }
+    if (line.startsWith(":")) return;
+    const separator = line.indexOf(":");
+    const field = separator === -1 ? line : line.slice(0, separator);
+    let value = separator === -1 ? "" : line.slice(separator + 1);
+    if (value.startsWith(" ")) value = value.slice(1);
+    if (field === "event") eventType = value;
+    if (field === "data") dataLines.push(value);
+  }
+
+  return {
+    async push(text) {
+      textBuffer += text;
+      // SSE 允许 CRLF、单独 CR 或单独 LF。只处理已经拥有行结束符的内容，
+      // 将最后一段保留到下一个网络 chunk，避免解析半行 JSON。
+      const lines = textBuffer.split(/\r\n|\r|\n/);
+      textBuffer = lines.pop() || "";
+      for (const line of lines) {
+        await processLine(line);
+      }
+    },
+    async finish() {
+      if (textBuffer) {
+        await processLine(textBuffer);
+        textBuffer = "";
+      }
+      await dispatchEvent();
+    },
+  };
+}
+
 function appendTool(data, finished = false) {
   clearEmptyState();
   const row = document.createElement("div");
@@ -238,13 +295,14 @@ form.addEventListener("submit", async (event) => {
       signal: controller.signal,
     });
     if (!response.ok) throw new Error(`Request failed: ${response.status}`);
+    if (!response.headers.get("content-type")?.includes("text/event-stream")) {
+      throw new Error("服务端没有返回 SSE 事件流");
+    }
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
-    let buffer = "";
-    const handleLine = async (line) => {
-      if (!line.trim()) return;
-      const eventData = JSON.parse(line);
+    const handleEvent = async (eventData) => {
+      if (!eventData || eventData.type === "connected") return;
       if (eventData.type === "tool_started") appendTool(eventData.data);
       if (eventData.type === "tool_finished") appendTool(eventData.data, true);
       if (eventData.type === "assistant_delta") {
@@ -271,18 +329,18 @@ form.addEventListener("submit", async (event) => {
         appendMessage("assistant", `错误：${eventData.data.message}`);
       }
     };
+    const sseParser = createSseParser(handleEvent);
     while (true) {
       const { value, done } = await reader.read();
-      buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
-      for (const line of lines) {
-        await handleLine(line);
+      if (value) {
+        await sseParser.push(decoder.decode(value, { stream: true }));
       }
-      if (done) break;
+      if (done) {
+        await sseParser.push(decoder.decode());
+        break;
+      }
     }
-    // 服务端最后一行可能没有换行符，while 循环结束后仍需处理残留内容。
-    await handleLine(buffer);
+    await sseParser.finish();
   } catch (error) {
     if (error.name !== "AbortError") appendMessage("assistant", `请求失败：${error.message}`);
   } finally {

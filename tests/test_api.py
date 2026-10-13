@@ -33,6 +33,27 @@ def make_client():
     return TestClient(create_app(agent=agent))
 
 
+def parse_sse(text):
+    """把测试客户端收集到的完整 SSE 响应还原为事件列表。"""
+    events = []
+    for frame in text.strip().split("\n\n"):
+        event_type = "message"
+        data_lines = []
+        for line in frame.splitlines():
+            if line.startswith("event:"):
+                event_type = line.removeprefix("event:").strip()
+            elif line.startswith("data:"):
+                data_lines.append(line.removeprefix("data:").lstrip())
+        if data_lines:
+            events.append(
+                {
+                    "type": event_type,
+                    "data": json.loads("\n".join(data_lines)),
+                }
+            )
+    return events
+
+
 def test_stream_chat_keeps_session_history():
     client = make_client()
 
@@ -45,7 +66,11 @@ def test_stream_chat_keeps_session_history():
         json={"session_id": "demo", "message": "again"},
     )
 
-    first_events = [json.loads(line) for line in first.text.splitlines()]
+    first_events = parse_sse(first.text)
+    assert first.headers["content-type"].startswith("text/event-stream")
+    assert first.headers["cache-control"] == "no-cache, no-transform"
+    assert first.headers["x-accel-buffering"] == "no"
+    assert first_events[0]["type"] == "connected"
     assert first_events[-1]["type"] == "done"
     assert first_events[-1]["data"]["content"] == "Echo: hello"
     assert first_events[-1]["data"]["usage"]["total_tokens"] == 15

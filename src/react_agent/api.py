@@ -29,6 +29,15 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=1)
 
 
+def format_sse_event(event_type: str, data: Dict[str, Any]) -> str:
+    """把一个 Agent 事件编码为标准 Server-Sent Events 帧。
+
+    SSE 使用空行分隔事件；事件名称放在 ``event:``，JSON 数据放在 ``data:``。
+    """
+    payload = json.dumps(data, ensure_ascii=False, default=str)
+    return f"event: {event_type}\ndata: {payload}\n\n"
+
+
 def create_app(
     agent: Optional[ReActAgent] = None,
     config_path: Path = Path("config.yaml"),
@@ -188,9 +197,14 @@ def create_app(
         )
 
         async def generate():
-            """异步生成 NDJSON，每一行都是一个完整 JSON 事件。"""
+            """异步生成标准 SSE，每个事件都以空行作为边界。"""
             final_content = ""
             run_usage = TokenUsage()
+            # 先立即发送一个小事件，让浏览器尽快收到响应头并确认连接已建立。
+            yield format_sse_event(
+                "connected",
+                {"session_id": request.session_id},
+            )
             context = await app.state.memory.build_context(
                 request.session_id,
                 current_message=request.message,
@@ -211,14 +225,14 @@ def create_app(
                     if event.type == "assistant_completed":
                         final_content = event.data["content"]
                         run_usage = TokenUsage(**event.data.get("usage", {}))
-                    yield json.dumps(
-                        {"type": event.type, "data": event.data},
-                        ensure_ascii=False,
-                        default=str,
-                    ) + "\n"
+                    yield format_sse_event(event.type, event.data)
             except Exception:
                 logger.exception("chat_failed session_id=%s", request.session_id)
-                raise
+                yield format_sse_event(
+                    "error",
+                    {"message": "聊天处理失败，请查看服务端日志"},
+                )
+                return
             if final_content:
                 # 完整回答落库，下一轮可以通过最近消息或检索找回。
                 app.state.memory.append_message(
@@ -239,20 +253,25 @@ def create_app(
                     run_usage.total_tokens,
                     session_usage.total_tokens,
                 )
-                yield json.dumps(
+                yield format_sse_event(
+                    "done",
                     {
-                        "type": "done",
-                        "data": {
-                            "content": final_content,
-                            "usage": run_usage.as_dict(),
-                            "session_usage": session_usage.as_dict(),
-                        },
+                        "content": final_content,
+                        "usage": run_usage.as_dict(),
+                        "session_usage": session_usage.as_dict(),
                     },
-                    ensure_ascii=False,
-                ) + "\n"
+                )
 
-        # StreamingResponse 不等待 generate 完全结束，会边生成边发送给浏览器。
-        return StreamingResponse(generate(), media_type="application/x-ndjson")
+        # 禁用缓存和常见反向代理缓冲，避免代理攒齐完整回答后才交给浏览器。
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     return app
 """FastAPI 服务和内存会话管理。"""

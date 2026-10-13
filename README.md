@@ -462,10 +462,12 @@ Agent calls tools. The AGENT gets results.
 
 ## HTTP API
 
-- `POST /api/chat/stream`：发送消息，返回 `application/x-ndjson` 事件流。
+- `POST /api/chat/stream`：发送消息，返回标准 `text/event-stream` SSE 事件流。
   如果模型服务支持 OpenAI 兼容的 `stream=true`，回答文本会通过
   `assistant_delta` 事件逐片段发送，前端会实时更新回答；工具调用仍会等参数
-  聚合完成后执行。
+  聚合完成后执行。因为请求需要通过 POST 发送 JSON，前端使用 `fetch` 读取响应
+  流并按照 SSE 的 `event:`、`data:` 和空行边界解析，而不是使用只支持 GET 的
+  原生 `EventSource`。
 - `GET /api/sessions/{session_id}`：读取内存中的会话消息。
 - `DELETE /api/sessions/{session_id}`：清空会话。
 - `GET /api/tools`：查看加载后的工具定义。
@@ -479,7 +481,7 @@ Agent calls tools. The AGENT gets results.
 }
 ```
 
-事件类型包括 `model_started`、`model_usage`、`assistant_delta`、
+事件类型包括 `connected`、`model_started`、`model_usage`、`assistant_delta`、
 `tool_started`、`tool_finished`、`assistant_completed`、`error` 和 `done`。
 
 ## 项目结构
