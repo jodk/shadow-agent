@@ -11,7 +11,12 @@
 - MCP stdio 工具
 - `SKILL.md + skill.yaml + tools.py` 形式的 Skill
 - SQLite 原文记忆、FTS5/BM25 关键词检索、Chroma 中文向量检索和 RRF 融合
-- 命令行聊天、FastAPI 接口和原生 HTML 聊天页面
+- 后台异步向量索引，不阻塞当前问答
+- OpenAI 兼容模型流、Agent 事件流和浏览器 SSE 实时输出
+- SQLite 会话列表、会话删除和跨会话长期记忆
+- 每轮输入/输出 Token 与会话累计 Token 统计
+- 命令行聊天、FastAPI 接口和原生 HTML/CSS/JavaScript 聊天页面
+- 控制台与滚动文件日志
 
 ## 推荐学习顺序
 
@@ -57,7 +62,7 @@ async for event in agent.stream(messages):
 ```
 
 `stream()` 是异步生成器。它通过 `yield` 分批返回事件，因此网页可以先显示
-“正在调用工具”，不用等最终回答全部生成。
+模型生成片段或“正在调用工具”，不用等最终回答全部生成。
 
 ```python
 @tool
@@ -155,6 +160,7 @@ agent:
   vector_memory_limit: 5
   fused_memory_limit: 8
   rrf_k: 60
+  cross_session_memory: true
 ```
 
 ### SQLite + Chroma 混合检索
@@ -193,7 +199,11 @@ PyTorch、Metal 和 macOS 版本组合可能直接触发 `segmentation fault`。
 embedding_device_selected model=... configured=cpu actual=cpu
 embedding_model_loaded model=... source=local device=cpu
 embedding_documents_started model=... document_count=1 device=cpu
+embedding_documents_finished model=... vector_dimension=768 device=cpu
 ```
+
+模型加载和 `encode()` 共用同一把异步锁。即使后台索引和在线向量检索同时
+发生，也不会让多个线程并发调用同一个 SentenceTransformer/PyTorch 模型实例。
 
 安装向量依赖：
 
@@ -244,7 +254,7 @@ RRF(d) = Σ 1 / (k + rank(d))
 
 ## 安装
 
-项目要求 Python 3.9 或更高版本。推荐 Python 3.10/3.11/3.12。
+项目要求 Python 3.9 或更高版本，当前开发环境使用 Python 3.12。
 
 ```bash
 python3 -m venv .venv
@@ -304,7 +314,70 @@ python -m react_agent --config config.yaml serve --host 127.0.0.1 --port 8000
 ```
 
 浏览器打开 `http://127.0.0.1:8000`。页面使用原生 HTML、CSS 和 JavaScript，
-没有前端构建步骤。
+没有前端构建步骤。页面当前提供：
+
+- 左侧会话列表，按最近活动时间排序；
+- 新建、切换、清空和删除会话；
+- 用户消息、流式模型回答和工具调用过程；
+- 本轮输入 Token、本轮输出 Token、本轮总 Token 和会话累计 Token；
+- 停止当前流式请求。
+
+修改前端文件后不需要执行 npm 构建。重新启动服务并刷新页面即可；`app.js`
+使用版本化 URL，避免浏览器继续使用旧的 SSE 解析代码。
+
+## 配置说明
+
+项目只读取 YAML 配置。完整示例见 `config.example.yaml`，主要配置如下：
+
+```yaml
+model:
+  base_url: "https://api.openai.com/v1"
+  api_key: "replace-with-your-api-key"
+  model: "gpt-4.1-mini"
+  temperature: 0.2
+  timeout_seconds: 60
+
+logging:
+  level: INFO
+  console: true
+  file: "./data/agent.log"
+  max_bytes: 10485760
+  backup_count: 5
+
+agent:
+  system_prompt: |
+    You are a helpful assistant.
+  max_steps: 10
+  memory_db: "./data/memory.db"
+  recent_messages: 8
+  keyword_memory_limit: 5
+  vector_memory_limit: 5
+  vector_enabled: true
+  embedding_model: "shibing624/text2vec-base-chinese"
+  embedding_device: "cpu"
+  vector_workers: 1
+  fused_memory_limit: 8
+  rrf_k: 60
+  cross_session_memory: true
+```
+
+相对路径都以 `config.yaml` 所在目录为基准。`cross_session_memory: true`
+表示检索长期记忆时会排除当前会话并从其他会话召回相关原文；当前会话连续性
+仍由最近消息保证。
+
+## 日志
+
+默认同时输出到终端和 `data/agent.log`。日志文件达到 `max_bytes` 后滚动，
+最多保留 `backup_count` 个历史文件。日志覆盖以下关键阶段：
+
+- 应用启动、关闭和加载的工具数量；
+- 模型请求、流式完成、耗时和 Token usage；
+- SQLite 消息写入、BM25 检索、向量检索和 RRF 融合；
+- embedding 模型本地发现、下载、加载设备和编码；
+- Chroma 写入、查询和会话向量删除；
+- 工具调用的开始、结束和错误。
+
+日志不会记录 API Key、完整系统提示词、完整用户消息或完整工具返回正文。
 
 ## Python 工具
 
@@ -468,8 +541,10 @@ Agent calls tools. The AGENT gets results.
   聚合完成后执行。因为请求需要通过 POST 发送 JSON，前端使用 `fetch` 读取响应
   流并按照 SSE 的 `event:`、`data:` 和空行边界解析，而不是使用只支持 GET 的
   原生 `EventSource`。
-- `GET /api/sessions/{session_id}`：读取内存中的会话消息。
-- `DELETE /api/sessions/{session_id}`：清空会话。
+- `GET /api/sessions`：返回会话列表、标题、预览和累计 Token。
+- `GET /api/sessions/{session_id}`：读取 SQLite 中的完整会话消息和累计 Token。
+- `GET /api/sessions/{session_id}/usage`：单独读取会话累计 Token。
+- `DELETE /api/sessions/{session_id}`：删除消息、Token 统计和对应 Chroma 向量。
 - `GET /api/tools`：查看加载后的工具定义。
 
 请求示例：
@@ -484,6 +559,32 @@ Agent calls tools. The AGENT gets results.
 事件类型包括 `connected`、`model_started`、`model_usage`、`assistant_delta`、
 `tool_started`、`tool_finished`、`assistant_completed`、`error` 和 `done`。
 
+一段实际 SSE 响应类似：
+
+```text
+event: connected
+data: {"session_id":"demo"}
+
+event: assistant_delta
+data: {"content":"计算结果","step":1}
+
+event: assistant_delta
+data: {"content":"是 96。","step":1}
+
+event: done
+data: {"content":"计算结果是 96。","usage":{"prompt_tokens":20,"completion_tokens":8,"total_tokens":28,"estimated":false},"session_usage":{"prompt_tokens":20,"completion_tokens":8,"total_tokens":28,"estimated":false}}
+```
+
+前端使用增量 SSE 状态机处理网络分块，支持 `LF`、`CRLF` 和单独 `CR`，
+也能处理 JSON 内容或换行符恰好被拆到两个网络 chunk 的情况。
+
+### Token 统计
+
+模型服务返回 `usage` 时，页面显示模型提供的准确值。模型服务未返回 usage 时，
+项目会分别估算输入和输出 Token，并把 `estimated` 标记为 `true`。一次 ReAct
+运行可能因为工具调用而多次请求模型，本轮统计会累加所有模型步骤；会话统计
+持久化在 SQLite 的 `session_usage` 表中。
+
 ## 项目结构
 
 ```text
@@ -492,21 +593,31 @@ src/react_agent/
 ├── model.py          # OpenAI 兼容客户端
 ├── config.py         # YAML 配置
 ├── factory.py        # 装配模型、工具和 Skill
-├── api.py            # FastAPI 和内存会话
+├── api.py            # FastAPI、会话 API 和浏览器 SSE
 ├── cli.py            # 命令行入口
+├── events.py         # Agent 流式事件结构
+├── logging_config.py # 控制台与滚动文件日志
+├── memory.py         # SQLite、FTS5/BM25、RRF 和后台索引
 ├── skills.py         # Skill 加载
+├── vector_store.py   # SentenceTransformer 和 Chroma
 ├── tools/
 │   ├── base.py       # Tool 与注册表
 │   ├── python.py     # Python 装饰器
 │   ├── rest.py       # REST 工具
 │   └── mcp.py        # MCP 适配
-└── static/           # 原生聊天页面
+└── static/
+    ├── index.html    # 原生聊天页面结构
+    ├── styles.css    # 页面布局和样式
+    └── app.js        # 会话、Token 统计和 SSE 状态机
 ```
 
 ## 测试
 
 ```bash
-pytest
+.venv/bin/python -m pytest -q
+.venv/bin/python -m compileall -q src tests
+node --check src/react_agent/static/app.js
 ```
 
-测试中的模型和 HTTP 服务都使用本地替身，不需要真实 API Key。
+测试中的模型和 HTTP 服务都使用本地替身，不需要真实 API Key，也不会下载
+真实 embedding 模型。
