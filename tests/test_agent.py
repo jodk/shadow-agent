@@ -129,3 +129,25 @@ async def test_agent_stops_after_max_steps():
 
     assert events[-1].type == "error"
     assert "maximum" in events[-1].data["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_agent_only_exposes_allowed_tools_and_adds_skill_instructions():
+    model = ScriptedModel(
+        [ModelResponse(message=AssistantMessage(content="done"))]
+    )
+    agent = ReActAgent(
+        model=model,
+        tools=ToolRegistry([multiply]),
+        system_prompt="base",
+    )
+
+    await agent.run(
+        [{"role": "user", "content": "hi"}],
+        additional_instructions="本轮请使用精确工具。",
+        allowed_tool_names=set(),
+    )
+
+    sent_messages, sent_tools = model.calls[0]
+    assert "本轮请使用精确工具。" in sent_messages[0]["content"]
+    assert sent_tools == []

@@ -14,7 +14,7 @@
 import json
 import logging
 import time
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional, Set
 
 from .events import AgentEvent
 from .model import ChatModel, ModelStreamEvent, TokenUsage
@@ -22,6 +22,8 @@ from .tools import ToolRegistry
 
 
 logger = logging.getLogger(__name__)
+# ``getLogger(__name__)`` 使用当前模块名创建日志记录器。
+# 这样调用 ``logger.info(...)`` 时，日志系统可以知道消息来自哪个文件。
 
 
 class ReActAgent:
@@ -38,14 +40,23 @@ class ReActAgent:
         system_prompt: str = "You are a helpful assistant.",
         max_steps: int = 10,
     ):
-        # ``or`` 在左侧为空时使用右侧值。调用者不传工具时，创建一个空注册表。
+        # 参数后的 ``: 类型`` 是类型标注，``-> 返回类型`` 也是类型标注。
+        # Python 运行时通常不会仅凭类型标注阻止错误，它主要帮助阅读者、
+        # IDE 和静态检查工具理解数据类型。
+        #
+        # ``or`` 在左侧对象为假值时使用右侧对象。这里表示调用者不传工具
+        # （传入 None）时，自动创建一个空的 ToolRegistry。
         self.model = model
         self.tools = tools or ToolRegistry()
         self.system_prompt = system_prompt
         self.max_steps = max_steps
 
     async def stream(
-        self, messages: List[Dict[str, Any]]
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        additional_instructions: str = "",
+        allowed_tool_names: Optional[Set[str]] = None,
     ) -> AsyncIterator[AgentEvent]:
         """运行 Agent，并逐个产出过程事件。
 
@@ -53,10 +64,27 @@ class ReActAgent:
         能在最终答案生成前先收到 ``model_started``、``tool_started`` 等过程事件。
         Web 页面正是利用这些事件实时显示工具执行过程。
         """
-        # 星号 ``*messages`` 会把列表中的元素展开到新列表中。
-        conversation = [{"role": "system", "content": self.system_prompt}, *messages]
+        # 形参列表中的单独 ``*`` 表示：后面的参数只能使用关键字传入。
+        # 例如必须写 ``agent.stream(messages, allowed_tool_names=names)``，
+        # 不能把 names 作为第三个位置参数传入。这样可避免参数顺序误用。
+        #
+        # 列表中的 ``*messages`` 是“可迭代对象解包”语法：
+        # [{"role": "system"}, *messages] 会把 messages 中的每条消息展开到
+        # 新列表，而不是把整个 messages 列表嵌套成一个元素。
+        system_prompt = self.system_prompt
+        if additional_instructions.strip():
+            # 能力路由只把本轮命中的 Skill 说明放进来，避免启动时把所有
+            # SKILL.md 都塞进每一次模型请求。
+            system_prompt = (
+                f"{system_prompt}\n\n"
+                "本轮相关 Skill 说明如下。只有在与当前问题相关时才参考：\n\n"
+                f"{additional_instructions.strip()}"
+            )
+        conversation = [{"role": "system", "content": system_prompt}, *messages]
         # 模型不能直接读取 Python 函数，因此要先转成 OpenAI tools JSON Schema。
-        definitions = self.tools.definitions()
+        # ``definitions`` 是一个普通列表；如果 allowed_tool_names 是集合，
+        # ToolRegistry 会只筛选本轮允许暴露的工具。
+        definitions = self.tools.definitions(allowed_tool_names)
         # 一次 Agent run 可能因为工具调用而调用模型多次，因此必须累计每一步 usage。
         run_usage = TokenUsage()
         logger.info(
@@ -66,15 +94,21 @@ class ReActAgent:
             self.max_steps,
         )
 
-        # 一次“步骤”代表调用一次模型。限制步骤数可以避免模型无限调用工具。
+        # 一次“步骤”代表调用一次模型。``range(start, stop)`` 包含 start，
+        # 但不包含 stop，所以这里最多执行 max_steps 次。
+        # 限制步骤数可以避免模型无限调用工具。
         for step in range(1, self.max_steps + 1):
             logger.info("model_step_started step=%d", step)
             yield AgentEvent("model_started", {"step": step})
             try:
                 # 优先使用模型的流式接口；旧的测试模型或自定义模型如果只实现
                 # complete，则继续走兼容分支。
+                # ``hasattr(object, name)`` 用来判断对象是否具有某个属性。
+                # 这里允许模型只实现 complete()，方便编写简单测试模型。
                 if hasattr(self.model, "stream"):
                     response = None
+                    # ``async for`` 逐个读取异步生成器产生的事件。
+                    # 每次循环都可能立刻把增量文本转发给浏览器。
                     async for model_event in self.model.stream(conversation, definitions):
                         if model_event.delta:
                             yield AgentEvent(
@@ -111,12 +145,15 @@ class ReActAgent:
             })
             # 无论有没有工具调用，都要先把 assistant 消息写回对话历史。
             # 有些模型要求后续 tool 消息之前必须存在对应的 assistant tool_calls。
+            # ``Dict[str, Any]`` 表示字典键是字符串、值可以是任意类型。
             assistant_payload: Dict[str, Any] = {
                 "role": "assistant",
                 "content": assistant.content,
             }
             if assistant.tool_calls:
-                # 列表推导式：遍历所有 ToolCall，生成 OpenAI 接口要求的字典。
+                # 列表推导式是 for 循环创建列表的简写：
+                # [表达式 for item in iterable]
+                # 这里遍历每个 ToolCall，生成 OpenAI 接口要求的字典。
                 assistant_payload["tool_calls"] = [
                     {
                         "id": call.id,
@@ -149,6 +186,7 @@ class ReActAgent:
                 return
 
             # 一个 assistant 消息可能同时请求多个工具，因此这里逐个执行。
+            # 即使只有一个工具调用，也保持列表循环结构，便于支持并行请求扩展。
             for call in assistant.tool_calls:
                 started_at = time.perf_counter()
                 logger.info(
@@ -161,7 +199,11 @@ class ReActAgent:
                     "tool_started",
                     {"id": call.id, "name": call.name, "arguments": call.arguments},
                 )
-                result = await self.tools.execute(call.name, call.arguments)
+                result = await self.tools.execute(
+                    call.name,
+                    call.arguments,
+                    allowed_names=allowed_tool_names,
+                )
                 logger.info(
                     "tool_call_completed name=%s call_id=%s ok=%s elapsed_ms=%.2f",
                     call.name,
@@ -179,6 +221,8 @@ class ReActAgent:
                         "error": result.error,
                     },
                 )
+                # ``append`` 会把一个完整对象追加到列表末尾。
+                # tool 消息必须放回 conversation，下一次模型调用才能看到结果。
                 conversation.append(
                     {
                         "role": "tool",
@@ -196,11 +240,21 @@ class ReActAgent:
             {"message": f"Maximum agent steps reached ({self.max_steps})."},
         )
 
-    async def run(self, messages: List[Dict[str, Any]]) -> str:
+    async def run(
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        additional_instructions: str = "",
+        allowed_tool_names: Optional[Set[str]] = None,
+    ) -> str:
         """只返回最终文本，适合不关心中间事件的调用方。"""
         answer = ""
         # ``async for`` 用来遍历异步生成器 ``stream`` 产生的事件。
-        async for event in self.stream(messages):
+        async for event in self.stream(
+            messages,
+            additional_instructions=additional_instructions,
+            allowed_tool_names=allowed_tool_names,
+        ):
             if event.type == "assistant_completed":
                 answer = event.data["content"]
             elif event.type == "error":

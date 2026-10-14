@@ -10,10 +10,14 @@ from typing import Dict, Union
 from react_agent.tools import tool
 
 
-# 返回值中的数值和字符串放在同一个字典中，因此值类型写成 Union[int, str]。
+# 这是一个“类型别名”：给复杂类型起一个容易阅读的名字。
+# Dict[str, Union[int, str]] 表示键是字符串，值可以是 int 或 str。
+# ``Union`` 是“类型并集”，意思是允许多个候选类型，而不是只能选一个。
 TextStatistics = Dict[str, Union[int, str]]
 
 
+# ``@tool`` 是装饰器语法，等价于先定义函数，再执行
+# ``count_text = tool(count_text)``。项目用它把普通函数注册为 Agent 工具。
 @tool
 def count_text(text: str) -> TextStatistics:
     """精确统计文本的字符数、非空白字符数、中文字符数、英文单词数和行数。"""
@@ -21,6 +25,8 @@ def count_text(text: str) -> TextStatistics:
     total_characters = len(text)
 
     # str.isspace() 可识别空格、制表符和换行符等空白字符。
+    # ``1 for character in text if ...`` 是生成器表达式：它逐个产生 1，
+    # 不会先创建完整的中间列表；sum 再把这些 1 相加。
     non_whitespace_characters = sum(
         1 for character in text if not character.isspace()
     )
@@ -43,6 +49,7 @@ def count_text(text: str) -> TextStatistics:
     }
 
 
+# 函数参数的 ``= False`` 是默认值：调用方不传 case_sensitive 时自动使用 False。
 @tool
 def count_keyword(
     text: str,
@@ -67,6 +74,7 @@ def count_keyword(
     }
 
 
+# 返回类型仍然复用 TextStatistics，因为这里的字典值同样包含 int 和 str。
 @tool
 def summarize_text_info(text: str, preview_length: int = 80) -> TextStatistics:
     """返回文本总长度、行数、首行和指定长度的内容预览。"""
@@ -77,6 +85,7 @@ def summarize_text_info(text: str, preview_length: int = 80) -> TextStatistics:
     first_line = lines[0] if lines else ""
 
     # 文本超过预览长度时添加省略号；否则返回完整文本。
+    # 这是条件表达式（三元表达式）：条件成立取左边，否则取右边。
     preview = (
         text[:preview_length] + "..."
         if len(text) > preview_length
@@ -91,5 +100,6 @@ def summarize_text_info(text: str, preview_length: int = 80) -> TextStatistics:
     }
 
 
-# SkillLoader 约定读取 TOOLS。只有放进这个列表的工具才会注册给 Agent。
+# 列表保存三个函数对象，而不是函数调用结果；因此加载 Skill 时可以读取
+# 它们的名称、文档字符串和参数类型，再交给 Agent 决定何时调用。
 TOOLS = [count_text, count_keyword, summarize_text_info]

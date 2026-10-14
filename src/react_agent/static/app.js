@@ -19,6 +19,7 @@ localStorage.setItem("react-agent-session", sessionId);
 let controller = null;
 let activeSessionId = sessionId;
 let streamingAssistant = null;
+let renderTimer = null;
 const emptyUsage = {
   prompt_tokens: 0,
   completion_tokens: 0,
@@ -44,13 +45,100 @@ function clearEmptyState() {
   messages.querySelector(".empty-state, .welcome-state")?.remove();
 }
 
+function normalizeAssistantMarkdown(source) {
+  // 模型有时会把 LaTeX 定界符写成 JSON/文本转义后的形式，例如 "\["。
+  // 这里只处理明确的公式定界符，不对普通反斜杠做全局替换，避免破坏代码路径。
+  let text = String(source ?? "")
+    .replace(/\\\r?\n/g, "\n")
+    .replace(/\\\\\[/g, "\\[")
+    .replace(/\\\\\]/g, "\\]")
+    .replace(/\\\\\(/g, "\\(")
+    .replace(/\\\\\)/g, "\\)");
+
+  // 有些模型会输出单独的 [ ... ] 公式块。只有内容包含常见数学命令/
+  // 运算符时才转换，普通说明文字仍然保持 Markdown 方括号。
+  text = text.replace(
+    /(^|\n)\[\s*([\s\S]*?)\s*\](?=\n|$)/g,
+    (match, prefix, body) => {
+      if (!/[=+\-*/^_]|\\(?:frac|boxed|sum|int|in|text|begin|left|right)/.test(body)) {
+        return match;
+      }
+      return `${prefix}$$\n${body.trim()}\n$$`;
+    },
+  );
+  return text;
+}
+
+function renderMarkdown(source) {
+  const normalized = normalizeAssistantMarkdown(source);
+  if (!window.marked || !window.DOMPurify) {
+    return escapeHtml(normalized).replace(/\n/g, "<br>");
+  }
+
+  marked.setOptions({
+    gfm: true,
+    breaks: true,
+  });
+  const rawHtml = marked.parse(normalized);
+  return DOMPurify.sanitize(rawHtml, {
+    USE_PROFILES: { html: true },
+    ADD_ATTR: ["target", "rel"],
+  });
+}
+
+function renderMath(element) {
+  if (!window.renderMathInElement) return;
+  renderMathInElement(element, {
+    delimiters: [
+      { left: "$$", right: "$$", display: true },
+      { left: "$", right: "$", display: false },
+      { left: "\\(", right: "\\)", display: false },
+      { left: "\\[", right: "\\]", display: true },
+    ],
+    throwOnError: false,
+    strict: "ignore",
+  });
+}
+
+function escapeHtml(value) {
+  const element = document.createElement("div");
+  element.textContent = value;
+  return element.innerHTML;
+}
+
+function renderAssistantMessage(element, content) {
+  element.dataset.rawContent = content;
+  element.innerHTML = renderMarkdown(content);
+  renderMath(element);
+}
+
+function scheduleAssistantRender() {
+  if (!streamingAssistant || renderTimer !== null) return;
+  // 流式输出可能每秒收到很多片段，使用 requestAnimationFrame 合并同一帧内
+  // 的更新，既保持实时感，又避免每个 token 都触发完整 Markdown 解析。
+  renderTimer = window.requestAnimationFrame(() => {
+    renderTimer = null;
+    if (streamingAssistant) {
+      renderAssistantMessage(
+        streamingAssistant,
+        streamingAssistant.dataset.rawContent || "",
+      );
+      messages.scrollTop = messages.scrollHeight;
+    }
+  });
+}
+
 function appendMessage(role, content) {
   clearEmptyState();
   const row = document.createElement("div");
   row.className = `message-row ${role}`;
   const element = document.createElement("div");
   element.className = `message ${role}`;
-  element.textContent = content;
+  if (role === "assistant") {
+    renderAssistantMessage(element, content);
+  } else {
+    element.textContent = content;
+  }
   row.appendChild(element);
   messages.appendChild(row);
   messages.scrollTop = messages.scrollHeight;
@@ -62,7 +150,9 @@ function appendAssistantDelta(content) {
   if (!streamingAssistant) {
     streamingAssistant = appendMessage("assistant", "");
   }
-  streamingAssistant.textContent += content;
+  streamingAssistant.dataset.rawContent =
+    (streamingAssistant.dataset.rawContent || "") + content;
+  scheduleAssistantRender();
   messages.scrollTop = messages.scrollHeight;
 }
 
@@ -311,7 +401,14 @@ form.addEventListener("submit", async (event) => {
       if (eventData.type === "assistant_completed") {
         // 流式 delta 已经显示过时，只做最终内容校正，避免重复追加。
         if (streamingAssistant) {
-          streamingAssistant.textContent = eventData.data.content || "";
+          if (renderTimer !== null) {
+            window.cancelAnimationFrame(renderTimer);
+            renderTimer = null;
+          }
+          renderAssistantMessage(
+            streamingAssistant,
+            eventData.data.content || streamingAssistant.dataset.rawContent || "",
+          );
         } else {
           appendMessage("assistant", eventData.data.content);
         }

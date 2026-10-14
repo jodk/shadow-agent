@@ -12,6 +12,8 @@ def _extract_path(value: Any, path: Optional[str]) -> Any:
     if not path:
         return value
     current = value
+    # ``for part in ...`` 依次处理路径中的每一段。
+    # 三元表达式 ``A if condition else B`` 根据条件选择一个值。
     for part in path.split("."):
         current = current[int(part)] if isinstance(current, list) else current[part]
     return current
@@ -27,6 +29,8 @@ def load_rest_tools(
     """
     data = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
     tools: List[Tool] = []
+    # ``dict.get("tools", [])`` 在键不存在时返回空列表，因此配置缺少 tools
+    # 时不会抛出 KeyError。
     for definition in data.get("tools", []):
         item = dict(definition)
         shared_client = client
@@ -39,12 +43,15 @@ def load_rest_tools(
             """
             url = spec["url"]
             # 路径参数：/users/{user_id} -> /users/7
+            # 默认参数 spec=item 会在创建闭包时保存当前 item。
+            # 这是解决 Python 循环闭包晚绑定问题的常见写法。
             for name in spec.get("path_params", []):
                 if name not in arguments:
                     raise ValueError(f"Missing path argument: {name}")
                 url = url.replace("{" + name + "}", str(arguments[name]))
 
             # 查询参数：{"verbose": True} -> ?verbose=true
+            # 字典推导式会边遍历边构造字典。
             query = {
                 name: str(arguments[name]).lower()
                 if isinstance(arguments.get(name), bool)
@@ -75,9 +82,11 @@ def load_rest_tools(
                     value = response.json()
                 return _extract_path(value, spec.get("response_path"))
             finally:
+                # finally 无论请求成功还是抛出异常都会执行，适合释放 HTTP 客户端。
                 if owns_client:
                     await active_client.aclose()
 
+        # ``append`` 将新建的 Tool 放入结果列表。
         tools.append(
             Tool(
                 name=item["name"],
@@ -86,6 +95,8 @@ def load_rest_tools(
                     "parameters", {"type": "object", "properties": {}}
                 ),
                 handler=handler,
+                keywords=item.get("keywords", []),
+                always_expose=bool(item.get("always_expose", False)),
             )
         )
     return tools

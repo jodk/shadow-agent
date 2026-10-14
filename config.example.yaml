@@ -40,6 +40,15 @@ agent:
   rrf_k: 60
   # 是否从所有会话检索长期记忆，而不是只检索当前会话。
   cross_session_memory: true
+  # 无论当前问题是什么都常驻暴露的高频核心工具。
+  always_tools: []
+  capability_keyword_limit: 10
+  capability_vector_limit: 10
+  capability_skill_limit: 3
+  capability_tool_limit: 8
+  capability_rrf_k: 60
+  capability_skill_token_budget: 2000
+  capability_tool_token_budget: 3000
 
 tools:
   rest:

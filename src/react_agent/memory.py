@@ -23,12 +23,15 @@ from .vector_store import ChromaVectorStore
 
 
 logger = logging.getLogger(__name__)
+# 模块级 logger 会继承项目统一的日志配置；这里不直接配置输出格式。
 
 
 @dataclass
 class MemoryHit:
     """一次检索命中，同时保存评分和原始消息。"""
 
+    # dataclass 字段带有类型标注。创建对象时按字段顺序传值，
+    # 也可以使用 MemoryHit(message_id=1, message=..., score=..., source=...)。
     message_id: int
     message: Dict[str, Any]
     score: float
@@ -49,10 +52,13 @@ def reciprocal_rank_fusion(
     这样 BM25 的 rank 分数和向量余弦相似度不需要做额外归一化。
     ``rank`` 从 1 开始，多个检索器都命中的消息会得到累加分。
     """
+    # 外层字典用消息 id 做 key，把同一条消息在多个检索器中的结果合并起来。
     fused: Dict[int, Dict[str, Any]] = {}
     sources: Dict[int, List[str]] = {}
 
     for ranked_list in ranked_lists:
+        # enumerate(..., start=1) 同时得到排名和命中对象。
+        # RRF 的 rank 从 1 开始，而不是 Python 常见的 0 开始。
         for rank, hit in enumerate(ranked_list, start=1):
             item = fused.setdefault(
                 hit.message_id,
@@ -64,10 +70,13 @@ def reciprocal_rank_fusion(
             item["score"] += 1.0 / (k + rank)
             sources.setdefault(hit.message_id, []).append(hit.source)
 
+    # sorted 返回新列表，不修改原始 fused 字典。
+    # key=lambda ... 是匿名函数，用于告诉 sorted 如何计算排序键。
     ordered = sorted(
         fused.items(),
         key=lambda pair: (-pair[1]["score"], pair[0]),
     )
+    # 列表推导式把排序后的键值对转换成 MemoryHit 对象列表。
     results = [
         MemoryHit(
             message_id=message_id,
@@ -97,7 +106,10 @@ class SQLiteMemory:
         self.path = str(path)
         self.vector_store = vector_store
         self.vector_workers = max(1, vector_workers)
+        # Queue 是异步安全的先进先出队列，生产者用 put，worker 用 get。
+        # Optional[T] 表示变量可能是 T，也可能是 None。
         self._index_queue: Optional[asyncio.Queue] = None
+        # asyncio.Task 表示一个正在事件循环中运行或等待的协程任务。
         self._index_workers: List[asyncio.Task] = []
         self._index_loop: Optional[asyncio.AbstractEventLoop] = None
         if self.path not in {":memory:", ""}:
@@ -173,6 +185,7 @@ class SQLiteMemory:
         """
         if self.vector_store is None:
             return
+        # get_running_loop 只能在异步事件循环中调用；没有 loop 时会抛出异常。
         current_loop = asyncio.get_running_loop()
         if self._index_loop is not current_loop:
             # 一个 SQLiteMemory 实例原则上只在一个服务 loop 中使用。若旧 loop
@@ -188,6 +201,7 @@ class SQLiteMemory:
         if self._index_workers:
             return
         self._index_queue = asyncio.Queue()
+        # create_task 把协程安排到事件循环中运行，不会阻塞当前函数。
         self._index_workers = [
             asyncio.create_task(
                 self._vector_index_worker(worker_id),
@@ -198,8 +212,10 @@ class SQLiteMemory:
         logger.info("memory_vector_workers_started count=%d", self.vector_workers)
 
     async def _vector_index_worker(self, worker_id: int) -> None:
+        # worker 是一个长期运行的异步协程：不断从队列取任务，直到收到 None。
         assert self._index_queue is not None
         while True:
+            # await queue.get() 在队列为空时暂停当前协程，让出事件循环。
             item = await self._index_queue.get()
             if item is None:
                 self._index_queue.task_done()
@@ -227,6 +243,8 @@ class SQLiteMemory:
         """非阻塞投递向量索引任务；本次问答不等待 embedding 完成。"""
         if self.vector_store is None:
             return
+        # 普通同步函数也可以检查当前是否存在异步 loop。
+        # 没有 loop 时安全跳过异步索引，不影响 SQLite 原文保存。
         try:
             asyncio.get_running_loop()
         except RuntimeError:
@@ -236,6 +254,8 @@ class SQLiteMemory:
             return
         self._ensure_index_workers()
         assert self._index_queue is not None
+        # 元组把一次索引任务的多个字段打包成一个对象。
+        # put_nowait 只负责入队，不等待 worker 完成，因此不会阻塞问答。
         self._index_queue.put_nowait((message_id, session_id, role, content))
         logger.debug(
             "memory_vector_index_scheduled message_id=%d queue_size=%d",
@@ -255,6 +275,8 @@ class SQLiteMemory:
         await self._index_queue.join()
         for _ in self._index_workers:
             self._index_queue.put_nowait(None)
+        # ``*self._index_workers`` 是列表解包，把每个 worker 作为 gather 的
+        # 独立参数传入。return_exceptions=True 允许统一完成关闭流程。
         await asyncio.gather(*self._index_workers, return_exceptions=True)
         self._index_workers.clear()
         self._index_queue = None
@@ -276,6 +298,7 @@ class SQLiteMemory:
         ``payload`` 保存完整消息，因此 tool_calls、tool_call_id 等字段不会丢失。
         ``content`` 单独保存一份，是为了让 FTS5 只索引可检索文本。
         """
+        # payload 保存完整原文；content 是专门用于 FTS 检索的文本。
         payload = json.dumps(message, ensure_ascii=False, default=str)
         content = self._searchable_content(message)
         with self._connect() as connection:
@@ -292,6 +315,7 @@ class SQLiteMemory:
                     time.time(),
                 ),
             )
+            # lastrowid 是 SQLite 自动生成的自增主键。
             message_id = int(cursor.lastrowid)
         role = str(message.get("role", "unknown"))
         logger.info(
@@ -308,6 +332,7 @@ class SQLiteMemory:
         self, session_id: str, messages: Iterable[Dict[str, Any]]
     ) -> List[int]:
         """批量保存消息，返回对应 id。"""
+        # 列表推导式：对每条消息调用 append_message，并收集返回的 id。
         return [self.append_message(session_id, message) for message in messages]
 
     def get_messages(self, session_id: str) -> List[Dict[str, Any]]:
@@ -494,6 +519,7 @@ class SQLiteMemory:
                 """,
                 (session_id, limit),
             ).fetchall()
+        # 列表推导式把数据库行转换成 MemoryHit 对象列表。
         hits = [
             MemoryHit(
                 message_id=int(row["id"]),
@@ -522,6 +548,7 @@ class SQLiteMemory:
         FTS5 查询语法可能包含特殊字符。这里把用户输入拆成 token 并加引号，
         避免普通中文或英文问题意外变成 FTS 操作符。
         """
+        # 正则表达式把输入切成可搜索片段；\w 表示字母、数字或下划线。
         tokens = re.findall(r"[\w\u4e00-\u9fff]+", query, flags=re.UNICODE)
         if not tokens:
             logger.info(
@@ -630,6 +657,7 @@ class SQLiteMemory:
             logger.exception("memory_vector_search_failed")
             return []
 
+        # 列表推导式提取向量查询返回的所有 message_id。
         message_ids = [row["message_id"] for row in rows]
         if not message_ids:
             return []
@@ -639,6 +667,7 @@ class SQLiteMemory:
                 f"SELECT id, payload FROM messages WHERE id IN ({placeholders})",
                 message_ids,
             ).fetchall()
+        # 字典推导式建立 id -> 消息的快速查找表。
         by_id = {int(row["id"]): json.loads(row["payload"]) for row in messages}
         hits = [
             MemoryHit(
@@ -690,6 +719,7 @@ class SQLiteMemory:
         exclude_session_id = session_id if cross_session else None
         # BM25 是同步 SQLite 查询，使用 to_thread 放到工作线程；Chroma 本身也是
         # 异步包装。gather 让两路检索并行，完成后再交给 RRF 融合。
+        # to_thread 把同步 SQLite 查询放进线程池，避免阻塞异步 Web 服务。
         keyword_task = asyncio.to_thread(
             self.search_keyword,
             memory_scope,
@@ -703,6 +733,7 @@ class SQLiteMemory:
             vector_limit,
             exclude_session_id=exclude_session_id,
         )
+        # gather 并发等待两路检索，返回值顺序与传入任务顺序一致。
         keyword_hits, vector_hits = await asyncio.gather(keyword_task, vector_task)
         fused_hits = reciprocal_rank_fusion(
             [keyword_hits, vector_hits],
@@ -719,6 +750,7 @@ class SQLiteMemory:
             )
         all_hits = fused_hits + fallback_hits
 
+        # 用字典按 message_id 去重；同一个 key 后续赋值会覆盖旧值。
         selected: Dict[int, Dict[str, Any]] = {}
         for hit in all_hits:
             selected[hit.message_id] = hit.message
@@ -729,6 +761,8 @@ class SQLiteMemory:
         unique: List[Dict[str, Any]] = []
         seen = set()
         for message in combined:
+            # 消息可能包含 list/dict，不能直接放入 set；
+            # JSON 字符串是可哈希的，因此可以作为去重 key。
             key = json.dumps(message, ensure_ascii=False, sort_keys=True, default=str)
             if key not in seen:
                 seen.add(key)

@@ -1,5 +1,9 @@
-# 是否在 Agent 启动时加载这个 Skill。
 enabled: true
-
-# SkillLoader 会动态导入这个 Python 文件，并读取其中名为 TOOLS 的列表。
+name: text-analysis
+description: 对中文和英文文本进行精确统计与结构分析
+keywords:
+  - 文本
+  - 字符数
+  - 关键词
+  - 统计
 python_module: tools.py

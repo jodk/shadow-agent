@@ -9,7 +9,7 @@
 - Python 函数工具
 - YAML 声明的 REST API 工具
 - MCP stdio 工具
-- `SKILL.md + skill.yaml + tools.py` 形式的 Skill
+- `SKILL.md + skill.yaml + tools.py` 形式的 Skill，并按需加载 Skill 正文
 - SQLite 原文记忆、FTS5/BM25 关键词检索、Chroma 中文向量检索和 RRF 融合
 - 后台异步向量索引，不阻塞当前问答
 - OpenAI 兼容模型流、Agent 事件流和浏览器 SSE 实时输出
@@ -82,10 +82,12 @@ multiply = tool(multiply)
 装饰后，`multiply` 已经是一个 `Tool` 对象，而不再只是原始函数。
 
 ```python
-agent, providers = await build_agent(config, base_dir)
+built = await build_agent(config, base_dir)
+agent = built.agent
 ```
 
-这是元组解包。`build_agent` 返回两个值，左侧两个变量分别接收它们。
+`build_agent` 返回一个 `BuiltAgent` 对象，其中包含 Agent、MCP Provider、
+Skill 元数据和能力路由器。
 
 ```python
 tools = [adapt(item) for item in response.tools]
@@ -468,10 +470,16 @@ examples/skills/calculator/
 └── tools.py
 ```
 
-`SKILL.md` 会追加到系统提示词，描述何时及如何使用这项能力。`skill.yaml`：
+`SKILL.md` 不会在启动时追加到全局系统提示词。启动时只读取 Skill 的名称、
+描述、关键词、工具名称和文件路径；每轮请求先用 BM25 + Chroma 向量检索并通过
+RRF 排名，只有命中的 Skill 才会把完整 `SKILL.md` 放入本轮提示词。这样 Skill
+数量很大时不会每轮重复消耗全部文档 Token。
 
 ```yaml
 enabled: true
+name: calculator
+description: 执行精确的数学运算
+keywords: [计算, 数学, 加法, 乘法]
 python_module: tools.py
 ```
 
@@ -530,8 +538,44 @@ python -m react_agent --config config.yaml chat
 Agent calls tools. The AGENT gets results.
 ```
 
-模型读取 `SKILL.md` 后会选择相应工具，工具返回结构化结果，模型再把结果组织成
+命中 Skill 后，所属工具和直接命中的工具 Schema 才会暴露给模型；配置中的
+`always_tools` 或工具的 `always_expose: true` 会常驻暴露。工具 Schema 和
+Skill 正文都有独立 token 预算，工具返回结构化结果，模型再把结果组织成
 自然语言回答。对应自动测试位于 `tests/test_text_analysis_skill.py`。
+
+### 渐进式能力暴露
+
+每轮问题会经过应用侧预路由：
+
+```text
+用户问题
+   ├── SQLite FTS5/BM25
+   └── Chroma capability collection
+             ↓
+           RRF
+             ↓
+命中的 Skill 正文 + 相关工具 Schema + always_tools
+```
+
+对应配置：
+
+```yaml
+agent:
+  always_tools: []
+  capability_keyword_limit: 10
+  capability_vector_limit: 10
+  capability_skill_limit: 3
+  capability_tool_limit: 8
+  capability_rrf_k: 60
+  capability_skill_token_budget: 2000
+  capability_tool_token_budget: 3000
+```
+
+能力目录使用同一个 `memory.db` 的独立 `capabilities` 表和
+`capabilities_fts` FTS5 表；向量索引使用同一个 Chroma 持久化目录下独立的
+`capabilities` collection。能力向量在后台同步，不阻塞当前问答。若 embedding
+加载或向量检索失败，本轮仍可使用 BM25；若整个能力路由失败，生产流程应降级到
+核心工具和无 Skill 说明继续回答。
 
 ## HTTP API
 
@@ -545,7 +589,8 @@ Agent calls tools. The AGENT gets results.
 - `GET /api/sessions/{session_id}`：读取 SQLite 中的完整会话消息和累计 Token。
 - `GET /api/sessions/{session_id}/usage`：单独读取会话累计 Token。
 - `DELETE /api/sessions/{session_id}`：删除消息、Token 统计和对应 Chroma 向量。
-- `GET /api/tools`：查看加载后的工具定义。
+- `GET /api/tools`：查看注册的工具定义。每轮真正发送给模型的工具会由能力路由
+  按问题动态筛选。
 
 请求示例：
 
@@ -556,7 +601,7 @@ Agent calls tools. The AGENT gets results.
 }
 ```
 
-事件类型包括 `connected`、`model_started`、`model_usage`、`assistant_delta`、
+事件类型包括 `connected`、`capability_route`、`model_started`、`model_usage`、`assistant_delta`、
 `tool_started`、`tool_finished`、`assistant_completed`、`error` 和 `done`。
 
 一段实际 SSE 响应类似：

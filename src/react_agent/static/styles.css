@@ -422,7 +422,6 @@ h1 {
   max-width: 100%;
   margin: 0 0 24px;
   line-height: 1.65;
-  white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
@@ -442,6 +441,112 @@ h1 {
   border-left: 2px solid #d9d6cf;
   color: #34322f;
   font-size: 14px;
+}
+
+.message.assistant > :first-child { margin-top: 0; }
+.message.assistant > :last-child { margin-bottom: 0; }
+
+.message.assistant p {
+  margin: 0 0 12px;
+}
+
+.message.assistant h1,
+.message.assistant h2,
+.message.assistant h3,
+.message.assistant h4 {
+  margin: 18px 0 8px;
+  color: var(--ink);
+  line-height: 1.35;
+  font-weight: 650;
+}
+
+.message.assistant h1 { font-size: 1.25em; }
+.message.assistant h2 { font-size: 1.15em; }
+.message.assistant h3,
+.message.assistant h4 { font-size: 1.05em; }
+
+.message.assistant ul,
+.message.assistant ol {
+  margin: 8px 0 14px;
+  padding-left: 24px;
+}
+
+.message.assistant li + li { margin-top: 4px; }
+
+.message.assistant blockquote {
+  margin: 12px 0;
+  padding: 8px 12px;
+  border-left: 3px solid #c9c4ba;
+  background: #f7f5f1;
+  color: #65615a;
+}
+
+.message.assistant code {
+  padding: 2px 4px;
+  border: 1px solid #e9e5de;
+  border-radius: 4px;
+  background: #f5f3ef;
+  color: #7b402b;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: .9em;
+}
+
+.message.assistant pre {
+  max-width: 100%;
+  margin: 12px 0;
+  padding: 12px 14px;
+  overflow-x: auto;
+  border: 1px solid #e5e0d8;
+  border-radius: 7px;
+  background: #f7f6f3;
+  color: #36332e;
+  line-height: 1.55;
+}
+
+.message.assistant pre code {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+}
+
+.message.assistant table {
+  width: 100%;
+  margin: 12px 0;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.message.assistant th,
+.message.assistant td {
+  padding: 7px 9px;
+  border: 1px solid #dedad2;
+  text-align: left;
+  vertical-align: top;
+}
+
+.message.assistant th {
+  background: #f5f2ed;
+  color: var(--ink);
+  font-weight: 650;
+}
+
+.message.assistant a {
+  color: #276b61;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.message.assistant .katex-display {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 4px 0;
+}
+
+.message.assistant .katex {
+  font-size: 1.05em;
 }
 
 .tool-event {

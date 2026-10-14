@@ -51,11 +51,14 @@ class TokenUsage:
 
     def __post_init__(self) -> None:
         """保证 total_tokens 与输入、输出之和一致。"""
+        # dataclass 创建对象后会自动调用 __post_init__。
+        # 这里适合做依赖多个字段的补充计算。
         if self.total_tokens <= 0 and (self.prompt_tokens or self.completion_tokens):
             self.total_tokens = self.prompt_tokens + self.completion_tokens
 
     def add(self, other: "TokenUsage") -> None:
         """把另一次模型调用的 usage 累加到当前对象。"""
+        # "TokenUsage" 是字符串形式的前向引用，允许在类定义内部引用本类。
         self.prompt_tokens += other.prompt_tokens
         self.completion_tokens += other.completion_tokens
         self.total_tokens += other.total_tokens
@@ -97,6 +100,8 @@ class ChatModel(Protocol):
     方法，就可以传给 ReActAgent。测试中的 ScriptedModel 就利用了这一点。
     """
 
+    # Protocol 用结构描述接口，而不是要求继承某个基类。
+    # 只要对象实现下面的方法，类型检查器就可以把它当作 ChatModel。
     async def complete(
         self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]
     ) -> ModelResponse:
@@ -131,6 +136,7 @@ class OpenAICompatibleClient:
         self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]
     ) -> ModelResponse:
         # Dict[str, Any] 表示键是字符串、值可以是任意类型的字典。
+        # 字典字面量创建请求 JSON；类型标注只说明预期结构。
         payload: Dict[str, Any] = {
             "model": self.config.model,
             "messages": messages,
@@ -141,6 +147,7 @@ class OpenAICompatibleClient:
             payload["tools"] = tools
 
         # 测试可以注入 MockTransport 客户端；真实运行时由这里临时创建客户端。
+        # is None 是判断“确实没有对象”的推荐写法。
         owns_client = self.client is None
         client = self.client or httpx.AsyncClient(timeout=self.config.timeout_seconds)
         started_at = time.perf_counter()
@@ -151,6 +158,7 @@ class OpenAICompatibleClient:
             len(messages),
             len(tools),
         )
+        # 外层 try/finally 负责释放客户端，内层 try/except 负责记录请求失败。
         try:
             try:
                 response = await client.post(
@@ -172,6 +180,7 @@ class OpenAICompatibleClient:
             response_data = response.json()
             message = response_data["choices"][0]["message"]
             tool_calls = []
+            # get 找不到 key 时返回 None；or [] 将 None 转成可遍历空列表。
             for item in message.get("tool_calls") or []:
                 function = item["function"]
                 raw_arguments = function.get("arguments") or "{}"
@@ -266,6 +275,7 @@ class OpenAICompatibleClient:
             len(tools),
         )
 
+        # 流式文本先收集到 list，最后用 join 一次性合并，避免反复拼接字符串。
         content_parts: List[str] = []
         tool_calls: Dict[int, Dict[str, Any]] = {}
         usage: Optional[TokenUsage] = None
@@ -292,6 +302,7 @@ class OpenAICompatibleClient:
                 )
                 raise
 
+            # HTTPX 的 aiter_lines 是异步生成器；收到一行就恢复一次循环。
             async for line in response.aiter_lines():
                 if not line or not line.startswith("data:"):
                     continue
@@ -320,6 +331,7 @@ class OpenAICompatibleClient:
                     content_parts.append(text)
                     yield ModelStreamEvent(delta=text)
 
+                # 同一工具调用可能跨多个 SSE chunk，因此按 index 累积参数片段。
                 for item in delta.get("tool_calls") or []:
                     index = int(item.get("index", 0))
                     current = tool_calls.setdefault(
@@ -372,6 +384,7 @@ class OpenAICompatibleClient:
             )
             yield ModelStreamEvent(response=final_response)
         finally:
+            # finally 即使流式请求中途抛异常也会执行，避免 HTTP 连接泄漏。
             await response.aclose() if "response" in locals() else None
             if owns_client:
                 await client.aclose()

@@ -1,2 +1,9 @@
 enabled: true
+name: calculator
+description: 执行精确的数学运算
+keywords:
+  - 计算
+  - 数学
+  - 加法
+  - 乘法
 python_module: tools.py

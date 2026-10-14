@@ -25,4 +25,7 @@ def test_home_page_contains_chat_controls():
     assert 'id="turn-output-tokens"' in response.text
     assert 'id="turn-total-tokens"' in response.text
     assert 'id="session-total-tokens"' in response.text
-    assert "/static/app.js?v=20261013-sse2" in response.text
+    assert "/static/app.js?v=20261014-markdown1" in response.text
+    assert "/static/vendor/marked.umd.js" in response.text
+    assert "/static/vendor/purify.min.js" in response.text
+    assert "/static/vendor/katex.min.js" in response.text

@@ -9,6 +9,7 @@ from react_agent.tools import tool
 @tool
 def add_numbers(left: float, right: float) -> float:
     """Add two numbers."""
+    # ``-> float`` 是返回值类型标注，告诉装饰器和阅读者结果应为浮点数。
     return left + right
 
 

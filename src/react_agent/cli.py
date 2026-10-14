@@ -16,10 +16,13 @@ logger = logging.getLogger(__name__)
 
 async def _chat(config_path: Path, message: str = "") -> None:
     """运行一次性或交互式终端聊天。"""
+    # async def 定义协程函数；它必须由 await 或 asyncio.run 驱动。
     config = load_config(config_path)
     configure_logging(config.logging, config_path.resolve().parent)
     logger.info("cli_chat_started config_path=%s", config_path.resolve())
-    agent, providers = await build_agent(config, config_path.resolve().parent)
+    built = await build_agent(config, config_path.resolve().parent)
+    agent = built.agent
+    providers = built.providers
     history = []
     try:
         while True:
@@ -28,7 +31,14 @@ async def _chat(config_path: Path, message: str = "") -> None:
             if not question:
                 break
             history.append({"role": "user", "content": question})
-            async for event in agent.stream(history):
+            # await 等待能力路由完成；selection 决定本轮暴露哪些工具。
+            selection = await built.capability_router.route(question)
+            # Agent.stream 是异步生成器，async for 可以边收到边打印。
+            async for event in agent.stream(
+                history,
+                additional_instructions=selection.skill_instructions,
+                allowed_tool_names=set(selection.tool_names),
+            ):
                 if event.type == "tool_started":
                     print(
                         f"[tool] {event.data['name']} "
@@ -57,7 +67,10 @@ async def _tools(config_path: Path) -> None:
     config = load_config(config_path)
     configure_logging(config.logging, config_path.resolve().parent)
     logger.info("cli_tools_started config_path=%s", config_path.resolve())
-    agent, providers = await build_agent(config, config_path.resolve().parent)
+    built = await build_agent(config, config_path.resolve().parent)
+    agent = built.agent
+    providers = built.providers
+    # try/finally 确保即使打印过程中异常，也会关闭 MCP Provider。
     try:
         for item in agent.tools.list():
             print(f"{item.name}: {item.description}")
@@ -69,6 +82,7 @@ async def _tools(config_path: Path) -> None:
 
 def main() -> None:
     """解析命令行参数并分派到 chat、tools 或 serve。"""
+    # argparse 将命令行参数解析成 Namespace 对象，属性名来自 add_argument。
     parser = argparse.ArgumentParser(description="Learning ReAct Agent")
     parser.add_argument("--config", default="config.yaml")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -93,6 +107,7 @@ def main() -> None:
             args.host,
             args.port,
         )
+        # uvicorn.run 是同步入口；它内部负责创建和运行 ASGI 事件循环。
         uvicorn.run(create_app(config_path=config_path), host=args.host, port=args.port)
     elif args.command == "tools":
         asyncio.run(_tools(config_path))

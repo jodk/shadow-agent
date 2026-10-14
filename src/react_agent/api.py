@@ -1,5 +1,6 @@
 import json
 import logging
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -25,6 +26,7 @@ logger = logging.getLogger(__name__)
 class ChatRequest(BaseModel):
     """POST /api/chat/stream 的请求体。"""
 
+    # Pydantic Field 会增加运行时校验；min_length=1 表示不能是空字符串。
     session_id: str = Field(min_length=1)
     message: str = Field(min_length=1)
 
@@ -34,6 +36,7 @@ def format_sse_event(event_type: str, data: Dict[str, Any]) -> str:
 
     SSE 使用空行分隔事件；事件名称放在 ``event:``，JSON 数据放在 ``data:``。
     """
+    # SSE 的 data 行必须是字符串，所以先把 Python 字典序列化成 JSON。
     payload = json.dumps(data, ensure_ascii=False, default=str)
     return f"event: {event_type}\ndata: {payload}\n\n"
 
@@ -46,6 +49,8 @@ def create_app(
 
     测试时可直接传入假的 Agent；真实启动时根据 config_path 构建 Agent。
     """
+    # 装饰器把下面的异步生成器函数转换成 FastAPI lifespan 上下文管理器。
+    # yield 之前执行启动逻辑，yield 之后执行关闭逻辑。
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         """管理整个 Web 应用的启动和关闭资源。
@@ -56,13 +61,12 @@ def create_app(
             config = load_config(config_path)
             configure_logging(config.logging, config_path.resolve().parent)
             logger.info("application_starting config_path=%s", config_path.resolve())
-            app.state.agent, app.state.mcp_providers = await build_agent(
-                config, config_path.resolve().parent
-            )
             memory_path = Path(config.agent.memory_db)
             if not memory_path.is_absolute():
                 memory_path = config_path.resolve().parent / memory_path
             vector_store = None
+            capability_vector_store = None
+            # 根据配置决定是否创建向量服务；None 表示后续只使用 SQLite/BM25。
             if config.agent.vector_enabled:
                 data_dir = memory_path.parent
                 model_directory_name = (
@@ -86,8 +90,27 @@ def create_app(
                     persist_directory=data_dir / "chroma",
                     embedding_model=embedding_model,
                 )
+                capability_vector_store = ChromaVectorStore(
+                    persist_directory=data_dir / "chroma",
+                    embedding_model=embedding_model,
+                    collection_name="capabilities",
+                )
             else:
                 logger.info("embedding_model_disabled reason=vector_enabled_false")
+            built = await build_agent(
+                config,
+                config_path.resolve().parent,
+                memory_path=memory_path,
+                capability_vector_store=capability_vector_store,
+            )
+            # app.state 是 FastAPI 提供的应用级共享对象。
+            app.state.agent = built.agent
+            app.state.mcp_providers = built.providers
+            app.state.capability_router = built.capability_router
+            # create_task 让能力向量同步在后台开始，不阻塞服务启动。
+            app.state.capability_sync_task = asyncio.create_task(
+                built.capability_catalog.synchronize_vectors()
+            )
             app.state.memory = SQLiteMemory(
                 memory_path,
                 vector_store=vector_store,
@@ -109,14 +132,23 @@ def create_app(
             # 测试或嵌入式调用传入 Agent 时没有完整 YAML 配置。此时使用独立的
             # 测试数据库，但只在真正进入 lifespan 后创建，不影响生产 serve。
             app.state.memory = SQLiteMemory(Path("data/test-memory.db"))
+            app.state.capability_router = None
+            app.state.capability_sync_task = None
             logger.info("test_memory_initialized path=data/test-memory.db")
         yield
+        capability_sync_task = getattr(app.state, "capability_sync_task", None)
+        if capability_sync_task is not None:
+            try:
+                await capability_sync_task
+            except Exception:
+                logger.exception("capability_vector_sync_shutdown_failed")
         if app.state.memory is not None:
             await app.state.memory.close()
         for provider in app.state.mcp_providers:
             await provider.close()
         logger.info("application_stopped")
 
+    # FastAPI 实例负责注册路由、管理请求和执行 lifespan。
     app = FastAPI(title="Learning ReAct Agent", lifespan=lifespan)
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     app.state.agent = agent
@@ -133,7 +165,10 @@ def create_app(
     app.state.memory_rrf_k = 60
     app.state.memory_cross_session = True
     app.state.mcp_providers = []
+    app.state.capability_router = None
+    app.state.capability_sync_task = None
 
+    # @app.get 是路由装饰器：把函数注册成 GET / 的处理函数。
     @app.get("/")
     async def home():
         return FileResponse(STATIC_DIR / "index.html")
@@ -142,6 +177,7 @@ def create_app(
     async def list_tools():
         """给前端或开发者查看当前可用工具，不包含工具处理函数本身。"""
         logger.debug("tools_list_requested")
+        # 列表推导式把内部 Tool 对象转换成前端可序列化的普通字典。
         return [
             {
                 "name": item.name,
@@ -196,15 +232,18 @@ def create_app(
             {"role": "user", "content": request.message},
         )
 
+        # generate 是异步生成器；StreamingResponse 会边迭代边发送内容。
         async def generate():
             """异步生成标准 SSE，每个事件都以空行作为边界。"""
             final_content = ""
             run_usage = TokenUsage()
             # 先立即发送一个小事件，让浏览器尽快收到响应头并确认连接已建立。
+            # yield 暂停生成器，并把一帧 SSE 交给客户端。
             yield format_sse_event(
                 "connected",
                 {"session_id": request.session_id},
             )
+            # await 等待上下文检索完成；期间事件循环可以处理其他请求。
             context = await app.state.memory.build_context(
                 request.session_id,
                 current_message=request.message,
@@ -221,7 +260,54 @@ def create_app(
                 len(context),
             )
             try:
-                async for event in app.state.agent.stream(context):
+                if app.state.capability_router is None:
+                    # 仅供 create_app(agent=...) 这类测试/嵌入式调用使用。
+                    selection = None
+                    allowed_tools = None
+                else:
+                    try:
+                        selection = await app.state.capability_router.route(
+                            request.message
+                        )
+                        allowed_tools = set(selection.tool_names)
+                        yield format_sse_event(
+                            "capability_route",
+                            {
+                                "skill_names": selection.skill_names,
+                                "tool_count": len(selection.tool_names),
+                                "skill_tokens": selection.skill_tokens,
+                                "tool_tokens": selection.tool_tokens,
+                            },
+                        )
+                    except Exception:
+                        # 能力检索属于优化层，不能阻断主问答。路由失败时只保留
+                        # 配置的核心工具，避免把全部工具重新暴露给模型。
+                        logger.exception(
+                            "capability_route_failed session_id=%s",
+                            request.session_id,
+                        )
+                        selection = None
+                        allowed_tools = set(
+                            app.state.capability_router.config.always_tools
+                        )
+                        yield format_sse_event(
+                            "capability_route",
+                            {
+                                "skill_names": [],
+                                "tool_count": len(allowed_tools),
+                                "skill_tokens": 0,
+                                "tool_tokens": 0,
+                                "degraded": True,
+                            },
+                        )
+                # async for 实时消费 Agent 事件流，再转成 SSE 发给前端。
+                async for event in app.state.agent.stream(
+                    context,
+                    additional_instructions=(
+                        selection.skill_instructions if selection is not None else ""
+                    ),
+                    allowed_tool_names=allowed_tools,
+                ):
                     if event.type == "assistant_completed":
                         final_content = event.data["content"]
                         run_usage = TokenUsage(**event.data.get("usage", {}))
@@ -263,6 +349,7 @@ def create_app(
                 )
 
         # 禁用缓存和常见反向代理缓冲，避免代理攒齐完整回答后才交给浏览器。
+        # StreamingResponse 不会等待 generate 全部执行后才返回。
         return StreamingResponse(
             generate(),
             media_type="text/event-stream",

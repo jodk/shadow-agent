@@ -8,12 +8,14 @@ class MCPToolProvider:
     """Load MCP tools lazily so the core project works without the MCP extra."""
 
     def __init__(self, config: MCPServerConfig):
+        # ``Any`` 表示这里暂时不限制 SDK 对象的具体类型，因为 MCP 是可选依赖。
         self.config = config
         self._session: Any = None
         self._stack: Any = None
 
     async def connect(self) -> List[Tool]:
         """启动 stdio MCP Server、初始化会话并发现工具。"""
+        # 延迟导入：只有用户真的配置 MCP 时才加载可选依赖。
         try:
             # MCP 是可选依赖，只有真正启用 MCP 时才导入。
             from contextlib import AsyncExitStack
@@ -30,6 +32,8 @@ class MCPToolProvider:
         if not self.config.command:
             raise ValueError("MCP stdio server requires a command.")
 
+        # AsyncExitStack 是异步版的资源管理器集合。
+        # 多个网络连接或子进程可以统一注册，最后由 aclose 逆序释放。
         self._stack = AsyncExitStack()
         # AsyncExitStack 集中管理多个异步上下文，close 时按相反顺序释放资源。
         read, write = await self._stack.enter_async_context(
@@ -44,10 +48,13 @@ class MCPToolProvider:
         await self._session.initialize()
         response = await self._session.list_tools()
         # 服务端工具通过 _adapt 转为本项目统一工具对象。
+        # 列表推导式把 SDK 的每个工具对象转换为内部 Tool。
         return [self._adapt(item) for item in response.tools]
 
     def _adapt(self, mcp_tool: Any) -> Tool:
         """把 MCP SDK 的工具对象包装成内部 Tool。"""
+        # handler 是闭包，会记住当前 mcp_tool 和 self._session，
+        # 因此 Agent 只需调用内部统一的 handler。
         async def handler(arguments: Dict[str, Any]) -> Any:
             response = await self._session.call_tool(mcp_tool.name, arguments)
             content = []
